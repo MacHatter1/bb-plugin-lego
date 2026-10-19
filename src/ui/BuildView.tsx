@@ -90,9 +90,9 @@ export function BrandBadge({ small = false }: { small?: boolean }) {
 
 export function StatusPill({ status }: { status: BookStatus }) {
   return (
-    <span key={status} className={`lego-pill lego-pill-${status}`}>
+    <span key={status} className={`lego-pill lego-pill-${status}`} title={STATUS_LABEL[status]}>
       <span className="lego-pill-dot" aria-hidden="true" />
-      {STATUS_LABEL[status]}
+      <span className="lego-pill-label">{STATUS_LABEL[status]}</span>
     </span>
   );
 }

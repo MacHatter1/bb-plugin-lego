@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { useRpc, type PluginThreadPanelProps } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "../../server";
 import { BuildView } from "./BuildView";
-import { BOOK_ID, useBook } from "./useBook";
+import { BOOK_ID, cachedLatest, rememberLatest, useBook } from "./useBook";
 
 function requestedBook(params: PluginThreadPanelProps["params"]): string | null {
   if (typeof params !== "object" || params === null || Array.isArray(params)) return null;
@@ -16,13 +16,16 @@ function requestedBook(params: PluginThreadPanelProps["params"]): string | null 
 export function BuildPanel({ threadId, params }: PluginThreadPanelProps) {
   const requested = requestedBook(params);
   const rpc = useRpc<typeof rpcContract>();
-  const [latest, setLatest] = useState<string | null | undefined>(requested === null ? undefined : null);
+  const [latest, setLatest] = useState<string | null | undefined>(() => (requested === null ? cachedLatest(threadId) : null));
   useEffect(() => {
     if (requested !== null) return;
     let live = true;
     rpc.call("book_latest", { threadId }).then(
-      (result) => live && setLatest(result.bookId),
-      () => live && setLatest(null),
+      (result) => {
+        rememberLatest(threadId, result.bookId);
+        if (live) setLatest(result.bookId);
+      },
+      () => live && setLatest((known) => known ?? null),
     );
     return () => {
       live = false;

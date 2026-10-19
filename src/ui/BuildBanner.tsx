@@ -12,7 +12,7 @@ import { bricksPlaced, pieceCount, type BookState } from "../book";
 import { StatusPill } from "./BuildView";
 import { BRICK_HEX, MinifigHead } from "./iso";
 import { Confetti, useMotion, type Motion } from "./motion";
-import { useBook, useOpenBuildPanel } from "./useBook";
+import { cachedLatest, rememberLatest, useBook, useOpenBuildPanel } from "./useBook";
 
 const DISMISSED_LIMIT = 50;
 
@@ -98,12 +98,15 @@ export function BuildBanner() {
   const pluginId = usePluginId();
   const { dismissed, dismiss } = useDismissed(pluginId);
   const openPanel = useOpenBuildPanel();
-  const [bookId, setBookId] = useState<string | null>(null);
+  const [bookId, setBookId] = useState<string | null>(() => cachedLatest(threadId) ?? null);
 
   const lookup = useCallback(() => {
     if (threadId === null) return;
     rpc.call("book_latest", { threadId }).then(
-      (result) => setBookId(result.bookId),
+      (result) => {
+        rememberLatest(threadId, result.bookId);
+        setBookId(result.bookId);
+      },
       () => undefined,
     );
   }, [rpc, threadId]);

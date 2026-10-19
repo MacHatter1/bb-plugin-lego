@@ -38,10 +38,13 @@
 }
 
 /* ------------------------------------------------------------ header */
+/* In a narrow panel the status pill wraps under the title instead of
+   squeezing it to an ellipsis. */
 .lego-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 6px 12px;
   min-width: 0;
 }
 .lego-badge {
@@ -64,7 +67,7 @@
 }
 .lego-heading {
   display: grid;
-  flex: 1;
+  flex: 1 1 160px;
   min-width: 0;
 }
 .lego-set {
@@ -857,6 +860,8 @@
   flex: 1;
   gap: 4px;
   min-width: 0;
+  /* Never run under the buttons when the banner is very narrow. */
+  overflow-x: clip;
 }
 .lego-banner-row {
   display: flex;
@@ -956,6 +961,32 @@
 @container lego-banner (max-width: 460px) {
   .lego-banner-latest {
     display: none;
+  }
+}
+/* A narrow banner keeps the title readable: the pill shrinks to its dot
+   (the label stays for screen readers and on hover), then the set number goes. */
+@container lego-banner (max-width: 520px) {
+  .lego-banner .lego-pill {
+    position: relative;
+    padding: 4px;
+    border-color: transparent;
+  }
+  .lego-banner .lego-pill-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+@container lego-banner (max-width: 380px) {
+  .lego-banner-set,
+  .lego-banner-crew {
+    display: none;
+  }
+  .lego-brickbar {
+    min-width: 36px;
   }
 }
 
