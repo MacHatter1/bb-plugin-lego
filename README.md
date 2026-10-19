@@ -25,7 +25,7 @@ A Master Builder assembles them while you watch a Lego model of your task come t
 <br>
 
 > [!NOTE]
-> The screenshots are real BB captures populated with fictional demo data.
+> The screenshots are real BB captures of fictional tasks. The shelf shows demo builds.
 
 ## The problem
 
@@ -111,17 +111,41 @@ naming its set, the task it was built for, the date and the crew.
 </tr>
 </table>
 
+<div align="center">
+<table>
+<tr>
+<td align="center"><img src="docs/screenshots/setup-form.jpg" alt="The build setup form under the composer banner for Set 77963, Recipe Box: a staffing note from the planning agent, three builders recommended, one provider and model for all builders, and a separate model for the Master Builder" width="440"><br><sub><b>You staff the crew before anything starts</b></sub></td>
+<td align="center"><img src="docs/screenshots/build-panel.jpg" alt="The side-panel workbench for Set 98313, Weather Dashboard, complete at 32 of 32 pieces: the weather station on its baseplate with the crew of minifigures around it, and six bag trays marked On the model" width="440"><br><sub><b>The workbench in the side panel</b></sub></td>
+</tr>
+<tr>
+<td colspan="2" align="center"><img src="docs/screenshots/composer-banner.jpg" alt="The composer banner for Set 98313 while the Master Builder assembles: a brick-coloured progress bar per bag at 31 of 32 pieces and the latest event, Master Builder attached Bag 3" width="686"><br><sub><b>Live status above the composer</b></sub></td>
+</tr>
+</table>
+</div>
+
 ## Install
 
-Until the repository is published, install from a local checkout:
+```sh
+bb plugin install git:https://github.com/MacHatter1/bb-plugin-lego --yes
+```
+
+Start a new thread and ask for a build with `/lego` and a task.
+
+> [!IMPORTANT]
+> The repository is private. Installing from git needs GitHub credentials with
+> access to it on the installing machine.
+
+<details>
+<summary><b>Install from a local clone</b></summary>
 
 ```sh
+git clone https://github.com/MacHatter1/bb-plugin-lego
 cd bb-plugin-lego
 npm install && bb plugin build
 bb plugin install path:$PWD --yes
 ```
 
-Start a new thread and ask for a build with `/lego` and a task.
+</details>
 
 **Requirements**
 
