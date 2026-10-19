@@ -6,6 +6,10 @@ All notable changes to Lego are documented here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- The build setup form fits BB's interaction card without scrolling, and its Start and Not now buttons stay in view on short windows. Whether every builder shares a model is now a toggle beside the builders' model picker.
+
 ## 0.1.0 - 2026-10-19
 
 ### Added

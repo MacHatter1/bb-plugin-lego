@@ -132,64 +132,68 @@ export function SetupForm({ interaction, submit, cancel }: PluginPendingInteract
       <Question
         number={1}
         title="How many builder agents?"
-        hint={`Recommended: ${payload.recommendedBuilders}. More than ${payload.parallelWidth} will wait on dependencies; builders pick up the next bag when they finish.`}
+        hint={
+          maxBuilders > payload.parallelWidth
+            ? `Recommended: ${payload.recommendedBuilders}. More than ${payload.parallelWidth} would wait on dependencies.`
+            : `Recommended: ${payload.recommendedBuilders}. A builder picks up the next bag when it finishes one.`
+        }
       >
-        <div className="lego-count" role="radiogroup" aria-label="Number of builders">
-          {counts.map((value) => (
+        <div className="lego-count-row">
+          <div className="lego-count" role="radiogroup" aria-label="Number of builders">
+            {counts.map((value) => (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={count === value}
+                className={`lego-count-option${count === value ? " lego-count-on" : ""}`}
+                onClick={() => setCount(value)}
+              >
+                {value}
+                {value === payload.recommendedBuilders ? <span className="lego-count-star" title="Recommended">★</span> : null}
+              </button>
+            ))}
+          </div>
+          <div className="lego-lineup" aria-hidden="true">
+            {Array.from({ length: count }, (_, index) => (
+              <span key={index} className="lego-lineup-head" style={{ animationDelay: `${Math.min(index, 8) * 40}ms` }}>
+                <MinifigHead size={22} />
+              </span>
+            ))}
+            <span className="lego-lineup-plus">+</span>
+            <span className="lego-lineup-head lego-lineup-master">
+              <MinifigHead master size={24} />
+            </span>
+          </div>
+        </div>
+      </Question>
+
+      <Question number={2} title={same ? "Which provider and model should the builders use?" : "Which provider and model for each builder?"}>
+        <div className="lego-model-row">
+          <div className="lego-toggle" role="radiogroup" aria-label="Same provider and model for every builder">
+            <button type="button" role="radio" aria-checked={same} className={same ? "lego-toggle-on" : undefined} onClick={() => setSame(true)}>
+              Same for all
+            </button>
             <button
-              key={value}
               type="button"
               role="radio"
-              aria-checked={count === value}
-              className={`lego-count-option${count === value ? " lego-count-on" : ""}`}
-              onClick={() => setCount(value)}
+              aria-checked={!same}
+              className={!same ? "lego-toggle-on" : undefined}
+              onClick={() => {
+                setSame(false);
+                setPerBuilder((current) => current.map((choice) => choice ?? sharedValue));
+              }}
             >
-              {value}
-              {value === payload.recommendedBuilders ? <span className="lego-count-star" title="Recommended">★</span> : null}
+              Per builder
             </button>
-          ))}
-        </div>
-        <div className="lego-lineup" aria-hidden="true">
-          {Array.from({ length: count }, (_, index) => (
-            <span key={index} className="lego-lineup-head" style={{ animationDelay: `${Math.min(index, 8) * 40}ms` }}>
-              <MinifigHead size={22} />
-            </span>
-          ))}
-          <span className="lego-lineup-plus">+</span>
-          <span className="lego-lineup-head lego-lineup-master">
-            <MinifigHead master size={24} />
-          </span>
-        </div>
-      </Question>
-
-      <Question number={2} title="Should every builder run the same provider and model?">
-        <div className="lego-toggle" role="radiogroup" aria-label="Same model for all builders">
-          <button type="button" role="radio" aria-checked={same} className={same ? "lego-toggle-on" : undefined} onClick={() => setSame(true)}>
-            Yes, same for all
-          </button>
-          <button
-            type="button"
-            role="radio"
-            aria-checked={!same}
-            className={!same ? "lego-toggle-on" : undefined}
-            onClick={() => {
-              setSame(false);
-              setPerBuilder((current) => current.map((choice) => choice ?? sharedValue));
-            }}
-          >
-            No, choose per builder
-          </button>
-        </div>
-      </Question>
-
-      <Question number={3} title={same ? "Which provider and model should the builders use?" : "Which provider and model for each builder?"}>
-        {same ? (
-          sharedValue === null ? (
-            <p className="lego-q-hint">Loading providers…</p>
+          </div>
+          {!same ? null : sharedValue === null ? (
+            <span className="lego-loading">Loading providers…</span>
           ) : (
             <ProviderModelPicker value={sharedValue} onChange={setShared} {...(routing ? { routing } : {})} />
-          )
-        ) : (
+          )}
+        </div>
+        {same ? null : (
           <ul className="lego-builder-list">
             {Array.from({ length: count }, (_, index) => {
               const value = perBuilder[index] ?? sharedValue;
@@ -198,7 +202,7 @@ export function SetupForm({ interaction, submit, cancel }: PluginPendingInteract
                   <MinifigHead size={18} />
                   <span className="lego-builder-name">Builder {index + 1}</span>
                   {value === null ? (
-                    <span className="lego-q-hint">Loading providers…</span>
+                    <span className="lego-loading">Loading providers…</span>
                   ) : (
                     <ProviderModelPicker
                       value={value}
@@ -215,11 +219,11 @@ export function SetupForm({ interaction, submit, cancel }: PluginPendingInteract
         )}
       </Question>
 
-      <Question number={4} title="Which provider and model should run the Master Builder?" hint="The Master Builder integrates every bag and fixes the seams, so a strong model pays off here.">
+      <Question number={3} title="Which provider and model should run the Master Builder?" hint="The Master Builder integrates every bag and fixes the seams, so a strong model pays off here.">
         <div className="lego-master-row">
           <MinifigHead master size={20} />
           {masterValue === null ? (
-            <span className="lego-q-hint">Loading providers…</span>
+            <span className="lego-loading">Loading providers…</span>
           ) : (
             <ProviderModelPicker value={masterValue} onChange={setMaster} {...(routing ? { routing } : {})} />
           )}
