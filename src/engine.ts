@@ -21,6 +21,8 @@ import {
   failureNotice,
   masterPrompt,
   nextBagPrompt,
+  unfinishedAssemblyPrompt,
+  unfinishedBagPrompt,
 } from "./prompts";
 import type { BookStore } from "./store";
 
@@ -50,6 +52,7 @@ export interface EngineDeps {
   publish(book: BookState): void;
   log: { info(message: string): void; warn(message: string): void; error(message: string): void };
   now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 type EventLog = (event: Omit<BookEvent, "at">) => void;
@@ -62,6 +65,15 @@ const SUMMARY_LIMIT = 6000;
 const NOTE_LIMIT = 500;
 /** A worker must have been dispatched this long before reconcile trusts an idle status. */
 const RECONCILE_GRACE_MS = 90_000;
+/**
+ * Errors worth another try: BB under load answers 5xx, or a message.dispatch
+ * hook (such as a concurrency limit) times out. Neither leaves a thread or a
+ * message behind, so retrying cannot duplicate work.
+ */
+const TRANSIENT = /HTTP 5\d\d|did not (?:decide|respond)|timed? ?out|ECONN|socket hang up|temporarily|busy/iu;
+const RETRY_DELAYS_MS = [3_000, 10_000];
+/** How much of a worker's own words a failure keeps. */
+const REASON_LIMIT = 2000;
 
 const clip = (text: string | null, limit: number): string | null =>
   text === null ? null : text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
@@ -88,9 +100,11 @@ export function nextReadyBag(book: BookState): BagState | undefined {
 export class BuildEngine {
   private readonly chains = new Map<string, Promise<void>>();
   private readonly now: () => number;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(private readonly deps: EngineDeps) {
     this.now = deps.now ?? Date.now;
+    this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
   // ---------------------------------------------------------------- planning
@@ -190,6 +204,7 @@ export class BuildEngine {
         builder.bagId = bag.id;
         builder.status = "working";
         builder.dispatchedAt = this.now();
+        builder.nudgedBag = null;
         log({ kind: "bag", text: `${builder.name} opened Bag ${bag.number} · ${bag.name}.` });
         assignments.push({ builderIndex: builder.index, bagId: bag.id });
       }
@@ -215,9 +230,13 @@ export class BuildEngine {
     const builder = book.builders[builderIndex - 1];
     const bag = book.bags.find((candidate) => candidate.id === bagId);
     if (builder === undefined || bag === undefined) return;
+    const wanted = () => {
+      const now = this.deps.store.get(bookId);
+      return now !== null && now.status === "building" && now.builders[builderIndex - 1]?.bagId === bagId;
+    };
     try {
       if (builder.threadId === null) {
-        const { threadId } = await this.deps.sdk.spawn({
+        const spawned = await this.withRetry(`start ${builder.name}`, wanted, () => this.deps.sdk.spawn({
           projectId: book.projectId,
           environmentId: book.environmentId,
           parentThreadId: book.threadId,
@@ -226,18 +245,18 @@ export class BuildEngine {
           choice: builder.choice,
           permissionMode: book.permissionMode,
           metadata: { bookId, role: "builder", builderIndex },
-        });
+        }));
+        if (spawned === undefined) return;
+        const { threadId } = spawned;
         this.deps.store.bindAgent(threadId, { bookId, role: "builder", builderIndex });
         this.update(bookId, (next) => {
           const target = next.builders[builderIndex - 1];
           if (target !== undefined) target.threadId = threadId;
         });
       } else {
-        await this.deps.sdk.send(
-          builder.threadId,
-          nextBagPrompt(book, bag, builder.name),
-          builder.choice,
-          book.permissionMode,
+        const threadId = builder.threadId;
+        await this.withRetry(`send ${builder.name} its next bag`, wanted, () =>
+          this.deps.sdk.send(threadId, nextBagPrompt(book, bag, builder.name), builder.choice, book.permissionMode),
         );
       }
     } catch (error) {
@@ -253,9 +272,13 @@ export class BuildEngine {
       this.failMaster(bookId, "no Master Builder model was chosen");
       return;
     }
+    const wanted = () => {
+      const now = this.deps.store.get(bookId);
+      return now !== null && now.status === "assembling" && now.master.status === "working";
+    };
     try {
       if (book.master.threadId === null) {
-        const { threadId } = await this.deps.sdk.spawn({
+        const spawned = await this.withRetry("start the Master Builder", wanted, () => this.deps.sdk.spawn({
           projectId: book.projectId,
           environmentId: book.environmentId,
           parentThreadId: book.threadId,
@@ -264,13 +287,18 @@ export class BuildEngine {
           choice,
           permissionMode: book.permissionMode,
           metadata: { bookId, role: "master", builderIndex: null },
-        });
+        }));
+        if (spawned === undefined) return;
+        const { threadId } = spawned;
         this.deps.store.bindAgent(threadId, { bookId, role: "master", builderIndex: null });
         this.update(bookId, (next) => {
           next.master.threadId = threadId;
         });
       } else {
-        await this.deps.sdk.send(book.master.threadId, masterPrompt(book), choice, book.permissionMode);
+        const threadId = book.master.threadId;
+        await this.withRetry("send the Master Builder its assembly", wanted, () =>
+          this.deps.sdk.send(threadId, masterPrompt(book), choice, book.permissionMode),
+        );
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -327,6 +355,28 @@ export class BuildEngine {
     return result;
   }
 
+  bagBlocked(threadId: string, reason: string): string {
+    const binding = this.binding(threadId, "builder");
+    let notice: string | null = null;
+    const { book, result } = this.mutate(binding.bookId, (book, log) => {
+      const builder = book.builders[(binding.builderIndex ?? 0) - 1];
+      const bag = book.bags.find((candidate) => candidate.id === builder?.bagId);
+      if (builder === undefined || bag === undefined) {
+        throw new LegoError("You have no bag in progress. Finish your turn.");
+      }
+      if (bag.status === "building") {
+        // The builder stays bound until its turn ends; threadIdle frees it.
+        bag.status = "failed";
+        bag.error = clip(`Blocked: ${reason.trim()}`, NOTE_LIMIT);
+        log({ kind: "error", text: `${builder.name} is blocked on Bag ${bag.number} · ${bag.name}.` });
+        notice = `${builder.name} is blocked on Bag ${bag.number} · ${bag.name}. It reported:\n${clip(reason.trim(), REASON_LIMIT)}`;
+      }
+      return `Bag ${bag.number} "${bag.name}" is marked blocked and the planning thread has been told. Finish your turn now.`;
+    });
+    if (notice !== null && book.status === "building") this.tellPlanner(book, notice);
+    return result;
+  }
+
   assemblyStep(threadId: string, stepNumber: number, note?: string): string {
     const binding = this.binding(threadId, "master");
     const { result } = this.mutate(binding.bookId, (book, log) => {
@@ -372,32 +422,106 @@ export class BuildEngine {
     const binding = this.deps.store.agentFor(threadId);
     if (binding === null) return;
     if (binding.role === "builder") {
-      const changed = this.update(binding.bookId, (book, log) => {
-        if (book.status === "cancelled") return;
-        const builder = book.builders[(binding.builderIndex ?? 0) - 1];
-        if (builder === undefined || builder.threadId !== threadId) return;
-        const bag = book.bags.find((candidate) => candidate.id === builder.bagId);
-        if (builder.status === "idle") return;
-        if (bag !== undefined && (bag.status === "building" || bag.status === "failed")) {
-          // The builder stopped without calling lego_bag_complete (or a failed
-          // turn was retried and recovered): its last message is the report.
-          this.finishBag(bag, lastText ?? "(the builder finished without a report)");
-          log({ kind: "bag", text: `${builder.name} finished Bag ${bag.number} · ${bag.name}.` });
-        }
-        if (bag !== undefined && !builder.bagsBuilt.includes(bag.id)) builder.bagsBuilt.push(bag.id);
-        builder.status = "idle";
-        builder.bagId = null;
-        builder.dispatchedAt = null;
-      });
-      if (changed.status === "building") this.schedule(binding.bookId);
+      this.builderIdle(binding.bookId, binding.builderIndex ?? 0, threadId, lastText);
       return;
     }
-    const book = this.get(binding.bookId);
-    if (book.master.threadId !== threadId) return;
-    if (book.master.status === "working" || book.master.status === "failed") {
-      this.completeBuild(binding.bookId, lastText ?? "(the Master Builder finished without a summary)");
+    this.masterIdle(binding.bookId, threadId, lastText);
+  }
+
+  /**
+   * A builder's turn ended. A bag whose steps were all reported is finished,
+   * with the last message as the report if lego_bag_complete never came. A
+   * builder that stopped short is asked once to report; stopping short again
+   * fails the bag, so a blocked builder never passes for a finished one.
+   */
+  private builderIdle(bookId: string, builderIndex: number, threadId: string, lastText: string | null): void {
+    let nudge: { prompt: string; choice: AgentChoice; bagId: string } | null = null;
+    let notice: string | null = null;
+    const book = this.update(bookId, (book, log) => {
+      if (book.status === "cancelled") return;
+      const builder = book.builders[builderIndex - 1];
+      if (builder === undefined || builder.threadId !== threadId || builder.status === "idle") return;
+      const bag = book.bags.find((candidate) => candidate.id === builder.bagId);
+      if (bag !== undefined && (bag.status === "building" || bag.status === "failed")) {
+        const reported = bag.steps.every((step) => step.done);
+        if (reported) {
+          this.finishBag(bag, lastText ?? "(the builder finished without a report)");
+          log({ kind: "bag", text: `${builder.name} finished Bag ${bag.number} · ${bag.name}.` });
+        } else if (bag.status === "building" && builder.nudgedBag !== bag.id) {
+          builder.nudgedBag = bag.id;
+          builder.dispatchedAt = this.now();
+          log({ kind: "info", text: `${builder.name} stopped before finishing Bag ${bag.number}; asking it to report.` });
+          nudge = { prompt: unfinishedBagPrompt(bag), choice: builder.choice, bagId: bag.id };
+          return;
+        } else if (bag.status === "building") {
+          const done = bag.steps.filter((step) => step.done).length;
+          const words = clip(lastText?.trim() || "(no message)", REASON_LIMIT);
+          bag.status = "failed";
+          bag.error = clip(`Stopped at ${done}/${bag.steps.length} steps: ${lastText?.trim() || "no message"}`, NOTE_LIMIT);
+          log({ kind: "error", text: `${builder.name} stopped without finishing Bag ${bag.number} · ${bag.name}.` });
+          notice = `${builder.name} stopped without finishing Bag ${bag.number} · ${bag.name} (${done}/${bag.steps.length} steps reported). Its last message:\n${words}`;
+        }
+      }
+      if (bag !== undefined && isBuilt(bag) && !builder.bagsBuilt.includes(bag.id)) builder.bagsBuilt.push(bag.id);
+      builder.status = "idle";
+      builder.bagId = null;
+      builder.dispatchedAt = null;
+    });
+    if (nudge !== null) {
+      const { prompt, choice, bagId } = nudge;
+      const builder = book.builders[builderIndex - 1];
+      const wanted = () => {
+        const now = this.deps.store.get(bookId);
+        return now !== null && now.status === "building" && now.builders[builderIndex - 1]?.bagId === bagId;
+      };
+      void this.withRetry(`nudge ${builder?.name ?? "a builder"}`, wanted, () =>
+        this.deps.sdk.send(threadId, prompt, choice, book.permissionMode),
+      ).catch((error: unknown) => {
+        this.failBuilder(bookId, builderIndex, `could not reach ${builder?.name ?? "the builder"}: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      return;
     }
-    void this.notifyDone(binding.bookId);
+    if (notice !== null && book.status === "building") this.tellPlanner(book, notice);
+    if (book.status === "building") this.schedule(bookId);
+  }
+
+  /** The Master Builder's turn ended: the same rules as builderIdle, for the whole model. */
+  private masterIdle(bookId: string, threadId: string, lastText: string | null): void {
+    const current = this.get(bookId);
+    if (current.master.threadId !== threadId || current.status === "cancelled") return;
+    const { status, steps } = current.master;
+    if (status === "working" || status === "failed") {
+      const done = steps.filter((step) => step.done).length;
+      if (done === steps.length) {
+        this.completeBuild(bookId, lastText ?? "(the Master Builder finished without a summary)");
+      } else if (status === "working" && current.master.nudged !== true) {
+        const book = this.update(bookId, (book, log) => {
+          book.master.nudged = true;
+          book.master.dispatchedAt = this.now();
+          log({ kind: "info", text: "The Master Builder stopped before finishing the assembly; asking it to report." });
+        });
+        const choice = book.master.choice;
+        if (choice !== null) {
+          const wanted = () => {
+            const now = this.deps.store.get(bookId);
+            return now !== null && now.status === "assembling" && now.master.status === "working";
+          };
+          void this.withRetry("nudge the Master Builder", wanted, () =>
+            this.deps.sdk.send(threadId, unfinishedAssemblyPrompt(book), choice, book.permissionMode),
+          ).catch((error: unknown) => {
+            this.failMaster(bookId, `could not reach the Master Builder: ${error instanceof Error ? error.message : String(error)}`);
+          });
+        }
+        return;
+      } else if (status === "working") {
+        this.failMaster(
+          bookId,
+          `it stopped at ${done}/${steps.length} assembly steps without reporting the model complete. Its last message:\n${clip(lastText?.trim() || "(no message)", REASON_LIMIT)}`,
+        );
+        return;
+      }
+    }
+    void this.notifyDone(bookId);
   }
 
   threadFailed(threadId: string, error: string | null): void {
@@ -486,6 +610,7 @@ export class BuildEngine {
       if (bagId === undefined && book.master.status === "failed") {
         book.master.status = "waiting";
         book.master.error = null;
+        book.master.nudged = false;
         masterRetry.value = true;
         log({ kind: "info", text: "The Master Builder will try the assembly again." });
       }
@@ -544,10 +669,33 @@ export class BuildEngine {
       notice = what;
     });
     if (notice !== null && book.status === "building") {
-      void this.deps.sdk.notify(book.threadId, failureNotice(book, notice)).catch((error: unknown) => {
-        this.deps.log.warn(`failure notice for ${bookId}: ${String(error)}`);
-      });
+      this.tellPlanner(book, notice);
       this.schedule(bookId);
+    }
+  }
+
+  private tellPlanner(book: BookState, what: string): void {
+    void this.deps.sdk.notify(book.threadId, failureNotice(book, what)).catch((error: unknown) => {
+      this.deps.log.warn(`failure notice for ${book.id}: ${String(error)}`);
+    });
+  }
+
+  /**
+   * Run a spawn or send, retrying transient failures while the work is still
+   * wanted. Resolves undefined if the build moved on during a wait.
+   */
+  private async withRetry<T>(what: string, wanted: () => boolean, run: () => Promise<T>): Promise<T | undefined> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await run();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const delay = RETRY_DELAYS_MS[attempt];
+        if (delay === undefined || !TRANSIENT.test(message)) throw error;
+        this.deps.log.warn(`${what}: ${message}; trying again in ${delay / 1000}s`);
+        await this.sleep(delay);
+        if (!wanted()) return undefined;
+      }
     }
   }
 

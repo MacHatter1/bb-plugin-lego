@@ -57,13 +57,14 @@ export function builderPrompt(book: BookState, bag: BagState, builderName: strin
     "## How to report progress",
     `- After you finish each step, call the \`lego_step_done\` tool with that step's number. Each call snaps a brick onto your bag in the user's live view.`,
     `- When the whole bag is built, call \`lego_bag_complete\` with a short report for the Master Builder: what you built, files you changed, the exact names/interfaces other bags or the Master Builder need, and anything left undone.`,
-    `- If those tools are unavailable, run \`bb lego step <number>\` and \`bb lego bag-done --summary "<report>"\` in the shell instead.`,
+    `- If you cannot build the bag (the code it builds on is missing, the workspace contradicts the brief, or you need a decision), do not report steps you did not do: call \`lego_bag_blocked\` with what is wrong and what you need. The planning thread is told.`,
+    `- If those tools are unavailable, run \`bb lego step <number>\`, \`bb lego bag-done --summary "<report>"\` or \`bb lego blocked --reason "<what you need>"\` in the shell instead.`,
     "",
     "## Rules",
     "- Stay inside your bag. Another builder is editing the other bags' files right now.",
     "- Do not commit, push, or open pull requests; the Master Builder integrates everything.",
     "- Do not wait for or message other builders. If something you need from another bag is missing, code against the studs and say so in your report.",
-    "- Finish your turn after calling lego_bag_complete.",
+    "- Finish your turn after calling lego_bag_complete or lego_bag_blocked.",
   ]
     .filter((line, index, lines) => !(line === "" && lines[index - 1] === ""))
     .join("\n");
@@ -74,6 +75,28 @@ export function nextBagPrompt(book: BookState, bag: BagState, builderName: strin
     `Nice work. Here is your next bag for Set ${book.setNumber}. Your earlier bag is done; do not edit it further.`,
     "",
     builderPrompt(book, bag, builderName),
+  ].join("\n");
+}
+
+/** Sent once when a builder stops without finishing or reporting its bag. */
+export function unfinishedBagPrompt(bag: BagState): string {
+  const done = bag.steps.filter((step) => step.done).length;
+  return [
+    `You stopped with ${done} of ${bag.steps.length} steps of Bag ${bag.number} "${bag.name}" reported, and without calling lego_bag_complete.`,
+    "- If the bag is built, call `lego_step_done` for each finished step you have not reported, then `lego_bag_complete` with your report.",
+    "- If you cannot build it, call `lego_bag_blocked` with what is wrong and what you need.",
+    "Then finish your turn. If you stop again without either, the bag is marked failed.",
+  ].join("\n");
+}
+
+/** Sent once when the Master Builder stops before reporting the finished model. */
+export function unfinishedAssemblyPrompt(book: BookState): string {
+  const done = book.master.steps.filter((step) => step.done).length;
+  return [
+    `You stopped with ${done} of ${book.master.steps.length} assembly steps reported, and without calling lego_build_complete.`,
+    "- If the model is assembled, call `lego_assembly_step` for each finished step you have not reported, then `lego_build_complete` with your summary, including anything still open.",
+    "- If you cannot finish, say what is blocking you in one short message.",
+    "Then finish your turn. If you stop again without lego_build_complete, the build is marked failed.",
   ].join("\n");
 }
 

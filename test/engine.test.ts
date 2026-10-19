@@ -31,14 +31,23 @@ function harness() {
   const sent: Array<{ threadId: string; prompt: string }> = [];
   const notices: Array<{ threadId: string; text: string }> = [];
   const stopped: string[] = [];
+  /** Errors the next spawn or send calls throw, in order. */
+  const failures: string[] = [];
+  const attempts = { spawn: 0, send: 0 };
   let next = 0;
   const sdk: WorkerSdk = {
     async spawn(launch) {
+      attempts.spawn += 1;
+      const failure = failures.shift();
+      if (failure !== undefined) throw new Error(failure);
       spawned.push(launch);
       next += 1;
       return { threadId: `thr_worker${next}` };
     },
     async send(threadId, prompt) {
+      attempts.send += 1;
+      const failure = failures.shift();
+      if (failure !== undefined) throw new Error(failure);
       sent.push({ threadId, prompt });
     },
     async notify(threadId, text) {
@@ -57,13 +66,14 @@ function harness() {
     sdk,
     publish: (book) => published.push(book.id),
     log: { info() {}, warn() {}, error() {} },
+    sleep: async () => {},
   });
   const book = engine.create(bookSpecSchema.parse(SPEC), {
     threadId: "thr_main",
     projectId: "proj_1",
     environmentId: "env_1",
   });
-  return { engine, store, book, spawned, sent, notices, stopped, published };
+  return { engine, store, book, spawned, sent, notices, stopped, published, failures, attempts };
 }
 
 describe("planning", () => {
@@ -127,7 +137,17 @@ describe("building", () => {
     state = store.get(book.id)!;
     expect(state.bags.find((bag) => bag.id === "docs")?.builder).toBe(1);
 
-    // Builder 2 goes idle without reporting: its last message becomes the report.
+    // Builder 2 stops without reporting anything: it is asked to report once.
+    engine.threadIdle("thr_worker2", "Looks good to me");
+    await engine.idle();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent.at(-1)).toMatchObject({ threadId: "thr_worker2" });
+    expect(sent.at(-1)?.prompt).toContain("0 of 1 steps");
+    state = store.get(book.id)!;
+    expect(state.bags.find((bag) => bag.id === "ui")?.status).toBe("building");
+
+    // It reports the step but forgets lego_bag_complete: its last message is the report.
+    engine.stepDone("thr_worker2", 1);
     engine.threadIdle("thr_worker2", "UI page built");
     await engine.idle();
     state = store.get(book.id)!;
@@ -197,6 +217,144 @@ describe("building", () => {
     const cancelled = await engine.cancel(book.id);
     expect(cancelled.status).toBe("cancelled");
     expect(stopped.sort()).toEqual(["thr_worker1", "thr_worker2"]);
+  });
+});
+
+describe("builders that stop short", () => {
+  it("never passes a blocked builder off as finished", async () => {
+    const { engine, store, book, notices, sent } = harness();
+    engine.start(book.id, { sameForAll: true, builders: [SONNET], master: OPUS }, null);
+    await engine.idle();
+
+    // First stop without a report: one nudge, the bag stays in progress.
+    engine.threadIdle("thr_worker1", "Blocked: this checkout is not the billing project.");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent).toHaveLength(1);
+    expect(store.get(book.id)?.bags[0]?.status).toBe("building");
+
+    // Second stop: the bag fails with the builder's words, and the planner hears.
+    engine.threadIdle("thr_worker1", "Blocked: this checkout is not the billing project.");
+    await engine.idle();
+    const state = store.get(book.id)!;
+    expect(state.bags[0]).toMatchObject({ status: "failed" });
+    expect(state.bags[0]?.steps.every((step) => !step.done)).toBe(true);
+    expect(state.bags[0]?.error).toContain("not the billing project");
+    expect(notices[0]?.text).toContain("not the billing project");
+    // The builder is free again and picks up the independent UI bag.
+    expect(state.bags[1]?.status).toBe("building");
+    expect(sent.at(-1)?.prompt).toContain('Bag 2 "UI"');
+  });
+
+  it("fails a bag at once when the builder reports it blocked", async () => {
+    const { engine, store, book, notices } = harness();
+    engine.start(book.id, { sameForAll: true, builders: [SONNET], master: OPUS }, null);
+    await engine.idle();
+    expect(engine.bagBlocked("thr_worker1", "src/types.ts has no Invoice type")).toContain("blocked");
+    await engine.idle();
+    expect(store.get(book.id)?.bags[0]).toMatchObject({ status: "failed", error: "Blocked: src/types.ts has no Invoice type" });
+    expect(notices[0]?.text).toContain("src/types.ts has no Invoice type");
+
+    // Its idle event frees the builder without finishing the bag.
+    engine.threadIdle("thr_worker1", "I am blocked.");
+    await engine.idle();
+    const state = store.get(book.id)!;
+    expect(state.bags[0]?.status).toBe("failed");
+    expect(state.bags[1]?.status).toBe("building");
+    expect(() => engine.bagBlocked("thr_main", "x")).toThrow(/not a Lego builder/);
+  });
+
+  it("asks the Master Builder once, then fails the build", async () => {
+    const { engine, store, book, notices, sent } = harness();
+    engine.start(book.id, { sameForAll: true, builders: [SONNET, SONNET, SONNET], master: OPUS }, null);
+    await engine.idle();
+    for (const thread of ["thr_worker1", "thr_worker2"]) {
+      engine.bagComplete(thread, "done");
+      engine.threadIdle(thread, null);
+    }
+    await engine.idle();
+    engine.bagComplete("thr_worker1", "docs done");
+    engine.threadIdle("thr_worker1", null);
+    await engine.idle();
+    expect(store.get(book.id)?.status).toBe("assembling");
+    const master = store.get(book.id)!.master.threadId!;
+
+    engine.assemblyStep(master, 1);
+    engine.threadIdle(master, "Wired the router.");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent.at(-1)).toMatchObject({ threadId: master });
+    expect(sent.at(-1)?.prompt).toContain("1 of 2 assembly steps");
+    expect(store.get(book.id)?.status).toBe("assembling");
+
+    engine.threadIdle(master, "Tests fail and I could not fix them.");
+    await engine.idle();
+    const state = store.get(book.id)!;
+    expect(state.status).toBe("failed");
+    expect(state.master.error).toContain("Tests fail");
+    expect(notices.at(-1)?.text).toContain("Tests fail");
+  });
+
+  it("completes when the Master Builder reported every step but no summary", async () => {
+    const { engine, store, book } = harness();
+    engine.start(book.id, { sameForAll: true, builders: [SONNET, SONNET], master: OPUS }, null);
+    await engine.idle();
+    for (const thread of ["thr_worker1", "thr_worker2"]) {
+      engine.bagComplete(thread, "done");
+      engine.threadIdle(thread, null);
+    }
+    await engine.idle();
+    engine.bagComplete("thr_worker1", "docs done");
+    engine.threadIdle("thr_worker1", null);
+    await engine.idle();
+    const master = store.get(book.id)!.master.threadId!;
+    engine.assemblyStep(master, 1);
+    engine.assemblyStep(master, 2);
+    engine.threadIdle(master, "All wired.");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(store.get(book.id)).toMatchObject({ status: "complete", master: { summary: "All wired." } });
+  });
+});
+
+describe("dispatch", () => {
+  it("retries a spawn that BB refused under load", async () => {
+    const { engine, store, book, failures, attempts, notices } = harness();
+    failures.push('HTTP 502: The "concurrency-limit" plugin\'s message.dispatch hook failed: did not decide within 10000ms');
+    engine.start(book.id, { sameForAll: true, builders: [SONNET], master: OPUS }, null);
+    await engine.idle();
+    expect(attempts.spawn).toBe(2);
+    expect(store.get(book.id)?.bags[0]?.status).toBe("building");
+    expect(store.get(book.id)?.builders[0]?.threadId).toBe("thr_worker1");
+    expect(notices).toHaveLength(0);
+  });
+
+  it("gives up after three transient failures, and at once on other errors", async () => {
+    const transient = harness();
+    transient.failures.push("HTTP 503: busy", "HTTP 503: busy", "HTTP 503: busy");
+    transient.engine.start(transient.book.id, { sameForAll: true, builders: [SONNET], master: OPUS }, null);
+    await transient.engine.idle();
+    expect(transient.attempts.spawn).toBe(3);
+    expect(transient.store.get(transient.book.id)?.bags[0]?.status).toBe("failed");
+
+    const invalid = harness();
+    invalid.failures.push("HTTP 400: unknown model");
+    invalid.engine.start(invalid.book.id, { sameForAll: true, builders: [SONNET], master: OPUS }, null);
+    await invalid.engine.idle();
+    expect(invalid.attempts.spawn).toBe(1);
+    expect(invalid.store.get(invalid.book.id)?.bags[0]?.error).toContain("unknown model");
+  });
+
+  it("drops a retry when the build was cancelled during the wait", async () => {
+    const { engine, store, book, failures, attempts } = harness();
+    failures.push("HTTP 502: bad gateway");
+    let cancel: Promise<unknown> | null = null;
+    // Cancel while the engine waits before its second attempt.
+    (engine as unknown as { sleep: () => Promise<void> }).sleep = async () => {
+      cancel = engine.cancel(book.id);
+      await cancel;
+    };
+    engine.start(book.id, { sameForAll: true, builders: [SONNET], master: OPUS }, null);
+    await engine.idle();
+    expect(attempts.spawn).toBe(1);
+    expect(store.get(book.id)?.status).toBe("cancelled");
   });
 });
 

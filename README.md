@@ -86,7 +86,7 @@ runs the Master Builder.
 
 When every bag is built, the Master Builder attaches them, fixes the seams and
 verifies the whole. Your thread gets a message when it finishes, or when a
-builder fails.
+builder fails or is blocked.
 
 </td>
 </tr>
@@ -192,8 +192,13 @@ sequenceDiagram
   reasoning you chose and the planning thread's permission mode.
 - **State that survives restarts.** Books live in the plugin's own SQLite
   database. Thread events missed while the plugin was unloaded are reconciled
-  every minute, and a builder that stops without reporting has its last message
-  taken as its report.
+  every minute.
+- **No bag passes for built unless it is.** A builder that cannot build its
+  bag says so with `lego_bag_blocked`. One that stops short is asked once to
+  report; if it stops short again, the bag fails and the planning thread gets
+  the builder's own words. The Master Builder is held to the same rule. A
+  thread BB refuses to start under load (a 5xx, or a dispatch hook timing out)
+  is retried twice before the bag fails.
 - **Blueprints, checked.** A blueprint compiles into at most 220 bricks on a
   baseplate of 6 to 24 studs a side. Bricks off the plate or colliding with
   earlier ones are dropped and reported back to the planning agent. Books
@@ -233,6 +238,7 @@ lb_7c1e2a9f04  Set 48213 "Billing dashboard"  building  12/31 pieces
 | `demo [--model <name>] [--builders 1-4] [--autoplay [--delay 3s]]` | Print a sample book in this thread. Press **Play demo** on its banner, or pass `--autoplay`. |
 | `step <number> [--note …]` | Builder fallback: report a finished step. |
 | `bag-done --summary …` | Builder fallback: report the bag is built. |
+| `blocked --reason …` | Builder fallback: report the bag cannot be built, and why. |
 | `assembled <number> [--note …]` | Master Builder fallback: report an assembly step. |
 | `complete --summary …` | Master Builder fallback: report the model is complete. |
 
@@ -240,7 +246,7 @@ lb_7c1e2a9f04  Set 48213 "Billing dashboard"  building  12/31 pieces
 
 **Agent tools:** `lego_create_book({ title, task, studs, bags, assembly, blueprint })`,
 `lego_setup_build({ bookId })`, `lego_status`, `lego_cancel_build` and `lego_retry`
-for the planning agent; `lego_step_done` and `lego_bag_complete` for builders;
+for the planning agent; `lego_step_done`, `lego_bag_complete` and `lego_bag_blocked` for builders;
 `lego_assembly_step` and `lego_build_complete` for the Master Builder. Each
 thread sees only its own set. The bundled [skill](skills/lego/SKILL.md) teaches
 the planning agent to cut a task into parallel bags and to design a blueprint
@@ -278,7 +284,8 @@ docs/             logo and screenshots
 ```
 
 **Tests** run the scheduler against a fake SDK and an in-memory SQLite
-database (parallel bags, builder reuse, dependencies, failures, retries and
+database (parallel bags, builder reuse, dependencies, failures, blocked and
+stalled builders, dispatch retries, user retries and
 cancelling), check every ready-made model for overlapping bricks, bricks off
 the baseplate, paint order and bag splits, and cover the blueprint compiler and
 model matching.

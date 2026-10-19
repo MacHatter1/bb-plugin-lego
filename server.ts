@@ -88,7 +88,7 @@ const PLANNER_TOOLS = [
   "lego_cancel_build",
   "lego_retry",
 ];
-const BUILDER_TOOLS = ["lego_step_done", "lego_bag_complete"];
+const BUILDER_TOOLS = ["lego_step_done", "lego_bag_complete", "lego_bag_blocked"];
 const MASTER_TOOLS = ["lego_assembly_step", "lego_build_complete"];
 
 function text(value: string, isError = false) {
@@ -462,6 +462,26 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.agents.registerTool({
+    name: "lego_bag_blocked",
+    description:
+      "Builder only: report that you cannot build your bag, and why. Use it instead of reporting steps you did not do, for example when the code the bag builds on is missing or the workspace contradicts the brief. The planning thread is told.",
+    presentation: {
+      label: { pending: "Reporting a blocked bag", completed: "Bag blocked" },
+      icon: { glyph: BRICK_GLYPH },
+    },
+    parameters: z.object({
+      reason: z
+        .string()
+        .min(1)
+        .max(2000)
+        .describe("What is wrong and what you need to build the bag"),
+    }),
+    async execute({ reason }, { threadId }) {
+      return guarded(() => engine.bagBlocked(threadId, reason));
+    },
+  });
+
+  bb.agents.registerTool({
     name: "lego_assembly_step",
     description: "Master Builder only: report that you finished one numbered assembly step. Bags that step attaches snap onto the main model in the live view.",
     presentation: {
@@ -506,7 +526,7 @@ export default async function plugin(bb: BbPluginApi) {
         tools: BUILDER_TOOLS,
         skills: [],
         instructions:
-          "You are a Lego builder agent. Report each finished step with lego_step_done and finish with lego_bag_complete. Do not start Lego builds of your own.",
+          "You are a Lego builder agent. Report each finished step with lego_step_done and finish with lego_bag_complete, or call lego_bag_blocked if you cannot build the bag. Do not start Lego builds of your own.",
       };
     }
     if (role === "master") {
@@ -611,6 +631,13 @@ export default async function plugin(bb: BbPluginApi) {
           options: { summary: { type: "string", required: true, description: "Report for the Master Builder (max 6000 chars)" } },
           async run(input, ctx) {
             return cliRun(() => engine.bagComplete(requireThread(ctx.threadId), input.options.summary));
+          },
+        }),
+        blocked: cliCommand({
+          summary: "Builder: report you cannot build your bag, and why",
+          options: { reason: { type: "string", required: true, description: "What is wrong and what you need (max 2000 chars)" } },
+          async run(input, ctx) {
+            return cliRun(() => engine.bagBlocked(requireThread(ctx.threadId), input.options.reason));
           },
         }),
         assembled: cliCommand({

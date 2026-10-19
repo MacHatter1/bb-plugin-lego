@@ -139,6 +139,8 @@ export interface BuilderState {
   bagsBuilt: string[];
   status: BuilderStatus;
   dispatchedAt: number | null;
+  /** The bag this builder was asked to report on after stopping short; one nudge per bag. */
+  nudgedBag?: string | null;
 }
 
 export type MasterStatus = "waiting" | "working" | "done" | "failed";
@@ -155,6 +157,8 @@ export interface MasterState {
   summary: string | null;
   error: string | null;
   dispatchedAt: number | null;
+  /** Whether the Master Builder was asked to report after stopping short. */
+  nudged?: boolean;
 }
 
 export interface BookEvent {

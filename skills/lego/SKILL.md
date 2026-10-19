@@ -145,7 +145,9 @@ plugin picks one from the title.
   worker fails. On completion, summarise the Master Builder's report; the
   banner already shows the finished model.
 - On failure, explain what failed and offer `lego_retry` (one bag via
-  `bagId`, or everything that failed) or `lego_cancel_build`.
+  `bagId`, or everything that failed) or `lego_cancel_build`. A blocked bag
+  quotes its builder: fix or explain the cause first (a retried builder gets
+  the same brief), and ask the user when it needs their decision.
 - `lego_status` gives a text snapshot whenever the user asks.
 
 ## CLI
@@ -153,7 +155,8 @@ plugin picks one from the title.
 `bb lego list`, `bb lego status <bookId>`, `bb lego cancel <bookId>`, and
 `bb lego retry <bookId> [--bag <bagId>]` mirror the tools. Builder and Master
 Builder threads can report with `bb lego step <n>`, `bb lego bag-done
---summary …`, `bb lego assembled <n>`, and `bb lego complete --summary …`
+--summary …`, `bb lego blocked --reason …`, `bb lego assembled <n>`, and
+`bb lego complete --summary …`
 when their tools are unavailable. If the user wants to see Lego without
 starting real agents, `bb lego demo` prints a sample book in this thread with
 simulated builders; they press Play on its banner.

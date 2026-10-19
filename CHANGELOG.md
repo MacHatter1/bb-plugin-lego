@@ -6,9 +6,20 @@ All notable changes to Lego are documented here. The format follows
 
 ## Unreleased
 
+### Added
+
+- `lego_bag_blocked` (and `bb lego blocked --reason`): a builder that cannot build its bag says why, the bag fails, and the planning thread is told.
+
 ### Changed
 
 - The build setup form fits BB's interaction card without scrolling, and its Start and Not now buttons stay in view on short windows. Whether every builder shares a model is now a toggle beside the builders' model picker.
+- The banner and the side panel show the last copy of a book at once when BB remounts them, instead of a loading line while BB is slow.
+
+### Fixed
+
+- A builder that stopped without finishing its bag had its last message taken as the bag's report, so a blocked bag was marked built and left for the Master Builder. A builder that stops short is now asked once to report, and the bag fails if it stops short again. The Master Builder is held to the same rule.
+- Starting a builder or the Master Builder failed the bag at the first HTTP 5xx or dispatch-hook timeout. Those are now retried twice, after 3 and 10 seconds, while the build still needs the thread.
+- In a narrow side panel the title shrank to an ellipsis beside the status pill; the pill now wraps under it. A narrow banner shows the status as a dot, and its text no longer runs under the Open build button.
 
 ## 0.1.0 - 2026-10-19
 

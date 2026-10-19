@@ -14,7 +14,7 @@ parallel and a Master Builder assembles the model.
   same workspace, and picks up the next bag whose dependencies are built.
 - **One Master Builder.** When every bag is built it attaches them, fixes the
   seams and verifies the whole. Your thread gets a message when it finishes,
-  or when a builder fails, with retry and cancel to recover.
+  or when a builder fails or is blocked, with retry and cancel to recover.
 - **A model that depicts the task.** The planning agent designs a Lego model
   for the work, such as a weather station for a weather dashboard, and each
   part of it becomes a bag.
