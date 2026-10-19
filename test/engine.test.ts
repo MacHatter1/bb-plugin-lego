@@ -26,7 +26,10 @@ const SPEC: BookSpec = {
 function harness() {
   const db = new DatabaseSync(":memory:");
   for (const statement of MIGRATIONS) db.exec(statement);
-  const store = new BookStore(db as unknown as SqlDatabase);
+  // One clock for the store and the engine, a second per tick, so order is exact.
+  let clock = 1_800_000_000_000;
+  const now = () => (clock += 1000);
+  const store = new BookStore(db as unknown as SqlDatabase, now);
   const spawned: WorkerLaunch[] = [];
   const sent: Array<{ threadId: string; prompt: string }> = [];
   const notices: Array<{ threadId: string; text: string }> = [];
@@ -34,6 +37,8 @@ function harness() {
   /** Errors the next spawn or send calls throw, in order. */
   const failures: string[] = [];
   const attempts = { spawn: 0, send: 0 };
+  /** Threads the fake BB reports as deleted. */
+  const deleted = new Set<string>();
   let next = 0;
   const sdk: WorkerSdk = {
     async spawn(launch) {
@@ -59,6 +64,9 @@ function harness() {
     async status() {
       return null;
     },
+    async exists(threadId) {
+      return !deleted.has(threadId);
+    },
   };
   const published: string[] = [];
   const engine = new BuildEngine({
@@ -67,13 +75,14 @@ function harness() {
     publish: (book) => published.push(book.id),
     log: { info() {}, warn() {}, error() {} },
     sleep: async () => {},
+    now,
   });
   const book = engine.create(bookSpecSchema.parse(SPEC), {
     threadId: "thr_main",
     projectId: "proj_1",
     environmentId: "env_1",
   });
-  return { engine, store, book, spawned, sent, notices, stopped, published, failures, attempts };
+  return { engine, store, book, spawned, sent, notices, stopped, published, failures, attempts, deleted };
 }
 
 describe("planning", () => {
@@ -355,6 +364,116 @@ describe("dispatch", () => {
     await engine.idle();
     expect(attempts.spawn).toBe(1);
     expect(store.get(book.id)?.status).toBe("cancelled");
+  });
+});
+
+/** Build the harness book to completion with two builders. */
+async function finish(h: ReturnType<typeof harness>, bookId = h.book.id) {
+  h.engine.start(bookId, { sameForAll: true, builders: [SONNET, SONNET], master: OPUS }, null);
+  await h.engine.idle();
+  const workers = h.store.get(bookId)!.builders.map((builder) => builder.threadId!);
+  for (const thread of workers) {
+    h.engine.bagComplete(thread, "done");
+    h.engine.threadIdle(thread, null);
+  }
+  await h.engine.idle();
+  const docs = h.store.get(bookId)!.builders.find((builder) => builder.status === "working")!.threadId!;
+  h.engine.bagComplete(docs, "docs done");
+  h.engine.threadIdle(docs, null);
+  await h.engine.idle();
+  h.engine.buildComplete(h.store.get(bookId)!.master.threadId!, "All wired");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+describe("deleted threads", () => {
+  it("keeps a finished set on the shelf, unlinked and in place", async () => {
+    const h = harness();
+    await finish(h);
+    const second = h.engine.create(bookSpecSchema.parse({ ...SPEC, title: "Second" }), {
+      threadId: "thr_other",
+      projectId: "proj_1",
+      environmentId: "env_1",
+    });
+    await finish(h, second.id);
+    expect(h.store.listComplete({ includeDemos: true, limit: 10, offset: 0 }).books.map((book) => book.id)).toEqual([second.id, h.book.id]);
+
+    h.engine.threadDeleted("thr_main");
+    const unlinked = h.store.get(h.book.id)!;
+    expect(unlinked.threadDeleted).toBe(true);
+    expect(h.store.get(second.id)?.threadDeleted).toBeUndefined();
+    // Unlinking is a later edit, but the shelf still orders by when the set was built.
+    expect(h.store.listComplete({ includeDemos: true, limit: 10, offset: 0 }).books.map((book) => book.id)).toEqual([second.id, h.book.id]);
+  });
+
+  it("stops messaging a deleted planning thread", async () => {
+    const { engine, store, book, notices } = harness();
+    engine.start(book.id, { sameForAll: true, builders: [SONNET], master: OPUS }, null);
+    await engine.idle();
+    engine.threadDeleted("thr_main");
+    engine.threadFailed("thr_worker1", "rate limited");
+    await engine.idle();
+    expect(store.get(book.id)?.bags[0]?.status).toBe("failed");
+    expect(notices).toHaveLength(0);
+  });
+
+  it("fails a deleted builder's bag, and a retry starts a fresh thread", async () => {
+    const { engine, store, book, notices, spawned, sent } = harness();
+    engine.start(book.id, { sameForAll: true, builders: [SONNET], master: OPUS }, null);
+    await engine.idle();
+    engine.threadDeleted("thr_worker1");
+    await engine.idle();
+    let state = store.get(book.id)!;
+    expect(state.bags[0]).toMatchObject({ status: "failed", error: "its thread was deleted" });
+    expect(state.builders[0]).toMatchObject({ status: "failed", threadId: null });
+    expect(notices[0]?.text).toContain("its thread was deleted");
+
+    engine.retry(book.id, "api");
+    await engine.idle();
+    state = store.get(book.id)!;
+    expect(spawned).toHaveLength(2);
+    expect(sent).toHaveLength(0);
+    expect(state.builders[0]?.threadId).toBe("thr_worker2");
+  });
+
+  it("only unlinks an idle builder, and fails a deleted Master Builder", async () => {
+    const { engine, store, book, notices } = harness();
+    engine.start(book.id, { sameForAll: true, builders: [SONNET, SONNET], master: OPUS }, null);
+    await engine.idle();
+    for (const thread of ["thr_worker1", "thr_worker2"]) {
+      engine.bagComplete(thread, "done");
+      engine.threadIdle(thread, null);
+    }
+    await engine.idle();
+    engine.bagComplete("thr_worker1", "docs done");
+    engine.threadIdle("thr_worker1", null);
+    await engine.idle();
+    expect(store.get(book.id)?.status).toBe("assembling");
+
+    // Builder 2 is idle while the Master Builder works: its link goes, nothing fails.
+    engine.threadDeleted("thr_worker2");
+    let state = store.get(book.id)!;
+    expect(state.builders[1]).toMatchObject({ status: "idle", threadId: null });
+    expect(state.status).toBe("assembling");
+    expect(notices).toHaveLength(0);
+
+    // The Master Builder mid-assembly: the build fails and the planner hears.
+    engine.threadDeleted("thr_worker3");
+    state = store.get(book.id)!;
+    expect(state).toMatchObject({ status: "failed", master: { status: "failed", threadId: null } });
+    expect(notices[0]?.text).toContain("its thread was deleted");
+  });
+
+  it("finds threads deleted while the plugin was unloaded", async () => {
+    const h = harness();
+    await finish(h);
+    const master = h.store.get(h.book.id)!.master.threadId!;
+    h.deleted.add("thr_main");
+    h.deleted.add(master);
+    await h.engine.sweepDeletedThreads();
+    const state = h.store.get(h.book.id)!;
+    expect(state.threadDeleted).toBe(true);
+    expect(state.master.threadId).toBeNull();
+    expect(state.builders.every((builder) => builder.threadId !== null)).toBe(true);
   });
 });
 

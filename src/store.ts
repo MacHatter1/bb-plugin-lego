@@ -1,7 +1,7 @@
 // Books live in the plugin's own SQLite database. better-sqlite3 is
 // synchronous, so every read-modify-write in `mutate` is atomic with respect
 // to concurrent tool calls and thread events.
-import { EVENT_LIMIT, type BookEvent, type BookState } from "./book";
+import { EVENT_LIMIT, builtAt, type BookEvent, type BookState } from "./book";
 
 export interface SqlStatement {
   run(...params: unknown[]): unknown;
@@ -81,16 +81,29 @@ export class BookStore {
     return rows.map((row) => JSON.parse(row.data) as BookState);
   }
 
-  /** Finished builds, newest first, for the collector's shelf. */
+  /** Every book a thread planned. */
+  forThread(threadId: string): BookState[] {
+    const rows = this.db
+      .prepare(`SELECT data FROM books WHERE thread_id = ? ORDER BY created_at`)
+      .all(threadId) as { data: string }[];
+    return rows.map((row) => JSON.parse(row.data) as BookState);
+  }
+
+  all(): BookState[] {
+    const rows = this.db.prepare(`SELECT data FROM books ORDER BY created_at`).all() as { data: string }[];
+    return rows.map((row) => JSON.parse(row.data) as BookState);
+  }
+
+  /** Finished builds, most recently finished first, for the collector's shelf. */
   listComplete(options: { includeDemos: boolean; limit: number; offset: number }): {
     books: BookState[];
     total: number;
     demos: number;
   } {
     const rows = this.db
-      .prepare(`SELECT data FROM books WHERE status = 'complete' ORDER BY updated_at DESC`)
+      .prepare(`SELECT data FROM books WHERE status = 'complete'`)
       .all() as { data: string }[];
-    const all = rows.map((row) => JSON.parse(row.data) as BookState);
+    const all = rows.map((row) => JSON.parse(row.data) as BookState).sort((a, b) => builtAt(b) - builtAt(a));
     const demos = all.filter((book) => book.demo === true).length;
     const books = options.includeDemos ? all : all.filter((book) => book.demo !== true);
     return { books: books.slice(options.offset, options.offset + options.limit), total: books.length, demos };

@@ -195,6 +195,10 @@ export interface BookState {
   demo?: boolean;
   /** How a demo book is staffed when someone presses Play. */
   demoSetup?: { builders: number; choice: AgentChoice };
+  /** The planning thread was deleted: the book keeps its place on the shelf, unlinked. */
+  threadDeleted?: boolean;
+  /** When the Master Builder finished; older books fall back to their "done" event. */
+  completedAt?: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -225,6 +229,16 @@ export function pieceCount(book: Pick<BookState, "bags" | "master">): number {
     book.bags.reduce((total, bag) => total + bag.steps.length, 0) +
     book.master.steps.length
   );
+}
+
+/** When a set was finished, for the shelf; later edits such as unlinking do not move it. */
+export function builtAt(book: Pick<BookState, "completedAt" | "events" | "updatedAt">): number {
+  if (typeof book.completedAt === "number") return book.completedAt;
+  for (let index = book.events.length - 1; index >= 0; index -= 1) {
+    const event = book.events[index];
+    if (event?.kind === "done") return event.at;
+  }
+  return book.updatedAt;
 }
 
 export function bricksPlaced(book: Pick<BookState, "bags" | "master">): number {

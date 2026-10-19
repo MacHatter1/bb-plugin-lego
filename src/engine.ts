@@ -24,7 +24,7 @@ import {
   unfinishedAssemblyPrompt,
   unfinishedBagPrompt,
 } from "./prompts";
-import type { BookStore } from "./store";
+import type { AgentBinding, BookStore } from "./store";
 
 export interface WorkerLaunch {
   projectId: string;
@@ -44,6 +44,8 @@ export interface WorkerSdk {
   notify(threadId: string, text: string): Promise<void>;
   stop(threadId: string): Promise<void>;
   status(threadId: string): Promise<{ status: string; lastText: string | null } | null>;
+  /** False once BB has deleted the thread. */
+  exists(threadId: string): Promise<boolean>;
 }
 
 export interface EngineDeps {
@@ -72,6 +74,8 @@ const RECONCILE_GRACE_MS = 90_000;
  */
 const TRANSIENT = /HTTP 5\d\d|did not (?:decide|respond)|timed? ?out|ECONN|socket hang up|temporarily|busy/iu;
 const RETRY_DELAYS_MS = [3_000, 10_000];
+/** How BB reports a thread that no longer exists. */
+const GONE = /HTTP 404|not found/iu;
 /** How much of a worker's own words a failure keeps. */
 const REASON_LIMIT = 2000;
 
@@ -555,11 +559,76 @@ export class BuildEngine {
           if (state.status === "idle") this.threadIdle(worker.threadId, state.lastText);
           else if (state.status === "error") this.threadFailed(worker.threadId, null);
         } catch (error) {
-          this.deps.log.warn(`reconcile ${worker.threadId}: ${String(error)}`);
+          if (GONE.test(error instanceof Error ? error.message : String(error))) this.threadDeleted(worker.threadId);
+          else this.deps.log.warn(`reconcile ${worker.threadId}: ${String(error)}`);
         }
       }
       if (book.status === "building") this.schedule(book.id);
     }
+  }
+
+  /**
+   * BB deleted a thread. Books it planned keep their place on the shelf but
+   * lose the link. A worker's link is cleared too; one that was mid-bag fails
+   * it, so a retry starts a fresh thread instead of messaging a deleted one.
+   */
+  threadDeleted(threadId: string): void {
+    const binding = this.deps.store.agentFor(threadId);
+    if (binding !== null) this.unlinkWorker(binding, threadId);
+    for (const book of this.deps.store.forThread(threadId)) {
+      if (book.threadDeleted === true) continue;
+      this.update(book.id, (next) => {
+        next.threadDeleted = true;
+      });
+    }
+  }
+
+  /** Catch threads deleted while the plugin was unloaded. */
+  async sweepDeletedThreads(): Promise<void> {
+    const known = new Map<string, boolean>();
+    const deleted = async (threadId: string): Promise<boolean> => {
+      let gone = known.get(threadId);
+      if (gone === undefined) {
+        try {
+          gone = !(await this.deps.sdk.exists(threadId));
+        } catch (error) {
+          this.deps.log.warn(`sweep ${threadId}: ${String(error)}`);
+          gone = false;
+        }
+        known.set(threadId, gone);
+      }
+      return gone;
+    };
+    for (const book of this.deps.store.all()) {
+      if (book.threadDeleted !== true && (await deleted(book.threadId))) this.threadDeleted(book.threadId);
+      // Demo workers are simulated; their thread ids were never real.
+      if (book.demo === true) continue;
+      const workers = [...book.builders.map((builder) => builder.threadId), book.master.threadId];
+      for (const threadId of workers) {
+        if (threadId !== null && (await deleted(threadId))) this.threadDeleted(threadId);
+      }
+    }
+  }
+
+  private unlinkWorker(binding: AgentBinding, threadId: string): void {
+    const book = this.deps.store.get(binding.bookId);
+    if (book === null) return;
+    if (binding.role === "builder") {
+      const index = binding.builderIndex ?? 0;
+      const builder = book.builders[index - 1];
+      if (builder === undefined || builder.threadId !== threadId) return;
+      if (builder.status === "working") this.failBuilder(book.id, index, "its thread was deleted");
+      this.update(book.id, (next) => {
+        const target = next.builders[index - 1];
+        if (target !== undefined && target.threadId === threadId) target.threadId = null;
+      });
+      return;
+    }
+    if (book.master.threadId !== threadId) return;
+    if (book.master.status === "working") this.failMaster(book.id, "its thread was deleted");
+    this.update(book.id, (next) => {
+      if (next.master.threadId === threadId) next.master.threadId = null;
+    });
   }
 
   // ------------------------------------------------------- user controls
@@ -647,6 +716,7 @@ export class BuildEngine {
       book.master.error = null;
       book.master.summary = clip(summary.trim() || "(no summary)", SUMMARY_LIMIT);
       book.status = "complete";
+      book.completedAt = this.now();
       book.error = null;
       log({ kind: "done", text: `Set ${book.setNumber} is complete: ${bricksPlaced(book)}/${pieceCount(book)} pieces placed.` });
     });
@@ -675,6 +745,7 @@ export class BuildEngine {
   }
 
   private tellPlanner(book: BookState, what: string): void {
+    if (book.threadDeleted === true) return;
     void this.deps.sdk.notify(book.threadId, failureNotice(book, what)).catch((error: unknown) => {
       this.deps.log.warn(`failure notice for ${book.id}: ${String(error)}`);
     });
@@ -708,17 +779,13 @@ export class BuildEngine {
       book.error = `Master Builder: ${reason}`;
       log({ kind: "error", text: `The Master Builder stopped: ${reason}` });
     });
-    if (book.status === "failed") {
-      void this.deps.sdk
-        .notify(book.threadId, failureNotice(book, `the Master Builder stopped: ${reason}`))
-        .catch((error: unknown) => this.deps.log.warn(`failure notice for ${bookId}: ${String(error)}`));
-    }
+    if (book.status === "failed") this.tellPlanner(book, `the Master Builder stopped: ${reason}`);
   }
 
   private async notifyDone(bookId: string): Promise<void> {
     let shouldNotify = false;
     const book = this.update(bookId, (book) => {
-      if (book.status === "complete" && !book.notified) {
+      if (book.status === "complete" && !book.notified && book.threadDeleted !== true) {
         book.notified = true;
         shouldNotify = true;
       }

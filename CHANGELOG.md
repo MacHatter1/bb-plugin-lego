@@ -14,6 +14,8 @@ All notable changes to Lego are documented here. The format follows
 
 - The build setup form fits BB's interaction card without scrolling, and its Start and Not now buttons stay in view on short windows. Whether every builder shares a model is now a toggle beside the builders' model picker.
 - The banner and the side panel show the last copy of a book at once when BB remounts them, instead of a loading line while BB is slow.
+- Deleting a thread unlinks it from its books. A set whose planning thread was deleted stays on the shelf, not clickable and marked "thread deleted", and the plugin stops messaging that thread. A builder or Master Builder deleted mid-work fails its bag or the assembly, so a retry starts a fresh thread. Deletions made while the plugin was unloaded are found when it starts.
+- The shelf orders sets, and dates their placards, by when they were finished rather than when the book last changed.
 
 ### Fixed
 

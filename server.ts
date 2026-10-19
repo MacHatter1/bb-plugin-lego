@@ -177,6 +177,15 @@ export default async function plugin(bb: BbPluginApi) {
       const { output } = await bb.sdk.threads.output({ threadId });
       return { status: thread.status, lastText: output };
     },
+    async exists(threadId) {
+      try {
+        const thread = await bb.sdk.threads.get({ threadId });
+        return thread.deletedAt === null;
+      } catch (error) {
+        if (/HTTP 404|not found/iu.test(error instanceof Error ? error.message : String(error))) return false;
+        throw error;
+      }
+    },
   };
 
   const publish = (book: BookState) =>
@@ -551,9 +560,17 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.failed", ({ thread, error }) => {
     engine.threadFailed(thread.id, error);
   });
+  bb.events.on("thread.deleted", ({ thread }) => {
+    engine.threadDeleted(thread.id);
+  });
 
   bb.background.service("reconcile", {
     async start(signal) {
+      try {
+        await engine.sweepDeletedThreads();
+      } catch (error) {
+        bb.log.warn(`deleted-thread sweep failed: ${String(error)}`);
+      }
       while (!signal.aborted) {
         try {
           await engine.reconcile();

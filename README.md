@@ -160,7 +160,7 @@ bb plugin install path:$PWD --yes
 | **Setup form** | Replaces the composer while the build is staffed. Nothing starts until you submit it. |
 | **Banner above the composer** | Live status: a brick-coloured progress bar per bag, the crew at work, the latest event, and **Open build**. |
 | **Side panel → Lego build** | The workbench: the model on its baseplate, a tray per bag with its builder, the instruction pages, the crew with thread links, cancel and retry. |
-| **Sidebar → Lego Build** | The collector's shelf of every finished model. Click one to open the thread that built it. |
+| **Sidebar → Lego Build** | The collector's shelf of every finished model. Click one to open the thread that built it. A set whose thread you deleted stays on the shelf, unlinked. |
 
 ## How it works
 
@@ -192,7 +192,10 @@ sequenceDiagram
   reasoning you chose and the planning thread's permission mode.
 - **State that survives restarts.** Books live in the plugin's own SQLite
   database. Thread events missed while the plugin was unloaded are reconciled
-  every minute.
+  every minute. Deleting a thread unlinks it: its books stay on the shelf
+  without a link, and a builder deleted mid-bag fails that bag so a retry
+  starts a fresh thread. Deletions made while the plugin was unloaded are
+  found when it next starts.
 - **No bag passes for built unless it is.** A builder that cannot build its
   bag says so with `lego_bag_blocked`. One that stops short is asked once to
   report; if it stops short again, the bag fails and the planning thread gets

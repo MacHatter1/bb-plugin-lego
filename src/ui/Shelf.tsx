@@ -1,10 +1,10 @@
 // The collector's shelf: a sidebar page showing every model a Lego build has
 // finished, standing on wooden shelves with a placard each. Click one to open
-// the thread that built it.
+// the thread that built it; a set whose thread was deleted stays, unlinked.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "../../server";
-import { bricksPlaced, type BookState } from "../book";
+import { bricksPlaced, builtAt, type BookState } from "../book";
 import { designFor } from "../designs";
 import { BrandBadge, modelLabel } from "./BuildView";
 import { ModelScene, STILL } from "./scene";
@@ -88,17 +88,13 @@ function dateLabel(at: number): string {
 }
 
 function ShelfModel({ book, onOpen }: { book: BookState; onOpen: () => void }) {
-  const { ref, seen } = useInView<HTMLButtonElement>();
+  const { ref, seen } = useInView<HTMLElement>();
   const design = designFor(book);
   const crew = book.builders.length;
-  return (
-    <button
-      ref={ref}
-      type="button"
-      className="lego-shelf-slot lego-shelf-filled"
-      onClick={onOpen}
-      aria-label={`Set ${book.setNumber}, ${design.name}, built for ${book.title}. Open its thread.`}
-    >
+  const unlinked = book.threadDeleted === true;
+  const label = `Set ${book.setNumber}, ${design.name}, built for ${book.title}.`;
+  const contents = (
+    <>
       <span className="lego-shelf-stage">
         <span className="lego-shelf-light" aria-hidden="true" />
         <span className="lego-shelf-model">
@@ -110,17 +106,36 @@ function ShelfModel({ book, onOpen }: { book: BookState; onOpen: () => void }) {
       <span className="lego-placard">
         <span className="lego-placard-set">
           Set {book.setNumber}
-          {book.demo === true ? <span className="lego-placard-demo">demo</span> : null}
+          {book.demo === true ? <span className="lego-placard-tag">demo</span> : null}
+          {unlinked ? <span className="lego-placard-tag">thread deleted</span> : null}
         </span>
         <span className="lego-placard-name">{design.name}</span>
         <span className="lego-placard-task" title={book.title}>
           {book.title.replace(/ \(demo\)$/u, "")}
         </span>
         <span className="lego-placard-meta">
-          {dateLabel(book.updatedAt)} · {bricksPlaced(book)} pieces · {crew} builder{crew === 1 ? "" : "s"}
+          {dateLabel(builtAt(book))} · {bricksPlaced(book)} pieces · {crew} builder{crew === 1 ? "" : "s"}
           {book.master.choice ? ` · ${modelLabel(book.master.choice)}` : ""}
         </span>
       </span>
+    </>
+  );
+  if (unlinked) {
+    return (
+      <div ref={ref as React.Ref<HTMLDivElement>} className="lego-shelf-slot" role="group" aria-label={`${label} Its thread was deleted.`}>
+        {contents}
+      </div>
+    );
+  }
+  return (
+    <button
+      ref={ref as React.Ref<HTMLButtonElement>}
+      type="button"
+      className="lego-shelf-slot lego-shelf-filled"
+      onClick={onOpen}
+      aria-label={`${label} Open its thread.`}
+    >
+      {contents}
     </button>
   );
 }

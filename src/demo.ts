@@ -197,6 +197,9 @@ function demoEngine(deps: DemoDeps): BuildEngine {
     async status() {
       return null;
     },
+    async exists() {
+      return true;
+    },
   };
   return new BuildEngine({ ...deps, sdk });
 }
