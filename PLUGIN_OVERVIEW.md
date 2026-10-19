@@ -1,6 +1,3 @@
-Plan a task as a Lego instruction book: builder agents build the bags in
-parallel and a Master Builder assembles the model.
-
 ## What you get
 
 - **An instruction book for every task.** The planning agent cuts the work
